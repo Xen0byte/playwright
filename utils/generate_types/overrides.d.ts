@@ -20,10 +20,10 @@ import { Readable } from 'stream';
 import { Serializable, EvaluationArgument, PageFunction, PageFunctionOn, SmartHandle, ElementHandleForTag, BindingSource } from './structs';
 
 type PageWaitForSelectorOptionsNotHidden = PageWaitForSelectorOptions & {
-  state: 'visible'|'attached';
+  state?: 'visible'|'attached';
 };
 type ElementHandleWaitForSelectorOptionsNotHidden = ElementHandleWaitForSelectorOptions & {
-  state: 'visible'|'attached';
+  state?: 'visible'|'attached';
 };
 
 export interface Page {
@@ -59,6 +59,25 @@ export interface Page {
 
   exposeBinding(name: string, playwrightBinding: (source: BindingSource, arg: JSHandle) => any, options: { handle: true }): Promise<void>;
   exposeBinding(name: string, playwrightBinding: (source: BindingSource, ...args: any[]) => any, options?: { handle?: boolean }): Promise<void>;
+
+  isHidden(selector: string): Promise<boolean>;
+  isHidden(selector: string, options?: {
+    /**
+     * Option `timeout` has no effect.
+     * @deprecated
+     */
+    timeout?: number
+  }): Promise<boolean>;
+
+  isVisible(selector: string): Promise<boolean>;
+  isVisible(selector: string, options?: {
+    /**
+     * Option `timeout` has no effect.
+     * @deprecated
+     */
+    timeout?: number
+  }): Promise<boolean>;
+
 }
 
 export interface Frame {
@@ -91,6 +110,25 @@ export interface Frame {
   waitForSelector(selector: string, options?: PageWaitForSelectorOptionsNotHidden): Promise<ElementHandle<SVGElement | HTMLElement>>;
   waitForSelector<K extends keyof HTMLElementTagNameMap>(selector: K, options: PageWaitForSelectorOptions): Promise<ElementHandleForTag<K> | null>;
   waitForSelector(selector: string, options: PageWaitForSelectorOptions): Promise<null|ElementHandle<SVGElement | HTMLElement>>;
+
+  isHidden(selector: string): Promise<boolean>;
+  isHidden(selector: string, options?: {
+    /**
+     * Option `timeout` has no effect.
+     * @deprecated
+     */
+    timeout?: number
+  }): Promise<boolean>;
+
+  isVisible(selector: string): Promise<boolean>;
+  isVisible(selector: string, options?: {
+    /**
+     * Option `timeout` has no effect.
+     * @deprecated
+     */
+    timeout?: number
+  }): Promise<boolean>;
+
 }
 
 export interface BrowserContext {
@@ -140,13 +178,13 @@ export interface ElementHandle<T=Node> extends JSHandle<T> {
   waitForSelector(selector: string, options: ElementHandleWaitForSelectorOptions): Promise<null|ElementHandle<SVGElement | HTMLElement>>;
 }
 
-export interface BrowserType<Browser> {
-
-}
-
-export interface ChromiumBrowser extends Browser {
-  contexts(): Array<ChromiumBrowserContext>;
-  newContext(options?: BrowserContextOptions): Promise<ChromiumBrowserContext>;
+export interface BrowserType<Unused = {}> {
+  connectOverCDP(options: ConnectOverCDPOptions): Promise<Browser>;
+  /**
+   * Option `wsEndpoint` is deprecated. Instead use `endpointURL`.
+   * @deprecated
+   */
+  connectOverCDP(options: ConnectOptions): Promise<Browser>;
 }
 
 export interface CDPSession {
@@ -320,6 +358,12 @@ export type AndroidKey =
   'Cut' |
   'Copy' |
   'Paste';
+
+export const chromium: BrowserType;
+export const firefox: BrowserType;
+export const webkit: BrowserType;
+export const _electron: Electron;
+export const _android: Android;
 
 // This is required to not export everything by default. See https://github.com/Microsoft/TypeScript/issues/19545#issuecomment-340490459
 export {};

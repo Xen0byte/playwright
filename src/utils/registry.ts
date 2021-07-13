@@ -15,29 +15,34 @@
  * limitations under the License.
  */
 
-import { execSync } from 'child_process';
-import fs from 'fs';
 import * as os from 'os';
 import path from 'path';
 import * as util from 'util';
-import { getUbuntuVersionSync } from './ubuntuVersion';
-import { assert, getFromENV } from './utils';
+import * as fs from 'fs';
+import lockfile from 'proper-lockfile';
+import { getUbuntuVersion } from './ubuntuVersion';
+import { assert, getFromENV, getAsBooleanFromENV, calculateSha1, removeFolders, existsAsync, hostPlatform } from './utils';
+import { installDependenciesLinux, installDependenciesWindows, validateDependenciesLinux, validateDependenciesWindows } from './dependencies';
+import { downloadBrowserWithProgressBar, logPolitely } from './browserFetcher';
 
-export type BrowserName = 'chromium'|'webkit'|'firefox'|'ffmpeg'|'webkit-technology-preview';
-export const allBrowserNames: BrowserName[] = ['chromium', 'webkit', 'firefox', 'ffmpeg', 'webkit-technology-preview'];
+export type BrowserName = 'chromium'|'chromium-with-symbols'|'webkit'|'firefox'|'firefox-beta'|'ffmpeg';
+export const allBrowserNames: Set<BrowserName> = new Set(['chromium', 'chromium-with-symbols', 'webkit', 'firefox', 'ffmpeg', 'firefox-beta']);
 
 const PACKAGE_PATH = path.join(__dirname, '..', '..');
 
-type BrowserPlatform = 'win32'|'win64'|'mac10.13'|'mac10.14'|'mac10.15'|'mac11'|'mac11-arm64'|'ubuntu18.04'|'ubuntu20.04';
-type BrowserDescriptor = {
-  name: BrowserName,
-  revision: string,
-  installByDefault: boolean,
-  browserDirectory: string,
-};
-
 const EXECUTABLE_PATHS = {
   'chromium': {
+    'ubuntu18.04': ['chrome-linux', 'chrome'],
+    'ubuntu20.04': ['chrome-linux', 'chrome'],
+    'mac10.13': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+    'mac10.14': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+    'mac10.15': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+    'mac11': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+    'mac11-arm64': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+    'win32': ['chrome-win', 'chrome.exe'],
+    'win64': ['chrome-win', 'chrome.exe'],
+  },
+  'chromium-with-symbols': {
     'ubuntu18.04': ['chrome-linux', 'chrome'],
     'ubuntu20.04': ['chrome-linux', 'chrome'],
     'mac10.13': ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
@@ -59,18 +64,18 @@ const EXECUTABLE_PATHS = {
     'win32': ['firefox', 'firefox.exe'],
     'win64': ['firefox', 'firefox.exe'],
   },
-  'webkit': {
-    'ubuntu18.04': ['pw_run.sh'],
-    'ubuntu20.04': ['pw_run.sh'],
-    'mac10.13': undefined,
-    'mac10.14': ['pw_run.sh'],
-    'mac10.15': ['pw_run.sh'],
-    'mac11': ['pw_run.sh'],
-    'mac11-arm64': ['pw_run.sh'],
-    'win32': ['Playwright.exe'],
-    'win64': ['Playwright.exe'],
+  'firefox-beta': {
+    'ubuntu18.04': ['firefox', 'firefox'],
+    'ubuntu20.04': ['firefox', 'firefox'],
+    'mac10.13': ['firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'],
+    'mac10.14': ['firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'],
+    'mac10.15': ['firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'],
+    'mac11': ['firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'],
+    'mac11-arm64': ['firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'],
+    'win32': ['firefox', 'firefox.exe'],
+    'win64': ['firefox', 'firefox.exe'],
   },
-  'webkit-technology-preview': {
+  'webkit': {
     'ubuntu18.04': ['pw_run.sh'],
     'ubuntu20.04': ['pw_run.sh'],
     'mac10.13': undefined,
@@ -106,9 +111,20 @@ const DOWNLOAD_URLS = {
     'win32': '%s/builds/chromium/%s/chromium-win32.zip',
     'win64': '%s/builds/chromium/%s/chromium-win64.zip',
   },
+  'chromium-with-symbols': {
+    'ubuntu18.04': '%s/builds/chromium/%s/chromium-with-symbols-linux.zip',
+    'ubuntu20.04': '%s/builds/chromium/%s/chromium-with-symbols-linux.zip',
+    'mac10.13': '%s/builds/chromium/%s/chromium-with-symbols-mac.zip',
+    'mac10.14': '%s/builds/chromium/%s/chromium-with-symbols-mac.zip',
+    'mac10.15': '%s/builds/chromium/%s/chromium-with-symbols-mac.zip',
+    'mac11': '%s/builds/chromium/%s/chromium-with-symbols-mac.zip',
+    'mac11-arm64': '%s/builds/chromium/%s/chromium-with-symbols-mac-arm64.zip',
+    'win32': '%s/builds/chromium/%s/chromium-with-symbols-win32.zip',
+    'win64': '%s/builds/chromium/%s/chromium-with-symbols-win64.zip',
+  },
   'firefox': {
     'ubuntu18.04': '%s/builds/firefox/%s/firefox-ubuntu-18.04.zip',
-    'ubuntu20.04': '%s/builds/firefox/%s/firefox-ubuntu-18.04.zip',
+    'ubuntu20.04': '%s/builds/firefox/%s/firefox-ubuntu-20.04.zip',
     'mac10.13': '%s/builds/firefox/%s/firefox-mac-10.14.zip',
     'mac10.14': '%s/builds/firefox/%s/firefox-mac-10.14.zip',
     'mac10.15': '%s/builds/firefox/%s/firefox-mac-10.14.zip',
@@ -117,22 +133,22 @@ const DOWNLOAD_URLS = {
     'win32': '%s/builds/firefox/%s/firefox-win32.zip',
     'win64': '%s/builds/firefox/%s/firefox-win64.zip',
   },
+  'firefox-beta': {
+    'ubuntu18.04': '%s/builds/firefox-beta/%s/firefox-beta-ubuntu-18.04.zip',
+    'ubuntu20.04': '%s/builds/firefox-beta/%s/firefox-beta-ubuntu-20.04.zip',
+    'mac10.13': '%s/builds/firefox-beta/%s/firefox-beta-mac-10.14.zip',
+    'mac10.14': '%s/builds/firefox-beta/%s/firefox-beta-mac-10.14.zip',
+    'mac10.15': '%s/builds/firefox-beta/%s/firefox-beta-mac-10.14.zip',
+    'mac11': '%s/builds/firefox-beta/%s/firefox-beta-mac-10.14.zip',
+    'mac11-arm64': '%s/builds/firefox-beta/%s/firefox-beta-mac-11.0-arm64.zip',
+    'win32': '%s/builds/firefox-beta/%s/firefox-beta-win32.zip',
+    'win64': '%s/builds/firefox-beta/%s/firefox-beta-win64.zip',
+  },
   'webkit': {
     'ubuntu18.04': '%s/builds/webkit/%s/webkit-ubuntu-18.04.zip',
     'ubuntu20.04': '%s/builds/webkit/%s/webkit-ubuntu-20.04.zip',
     'mac10.13': undefined,
     'mac10.14': '%s/builds/deprecated-webkit-mac-10.14/%s/deprecated-webkit-mac-10.14.zip',
-    'mac10.15': '%s/builds/webkit/%s/webkit-mac-10.15.zip',
-    'mac11': '%s/builds/webkit/%s/webkit-mac-10.15.zip',
-    'mac11-arm64': '%s/builds/webkit/%s/webkit-mac-11.0-arm64.zip',
-    'win32': '%s/builds/webkit/%s/webkit-win64.zip',
-    'win64': '%s/builds/webkit/%s/webkit-win64.zip',
-  },
-  'webkit-technology-preview': {
-    'ubuntu18.04': '%s/builds/webkit/%s/webkit-ubuntu-18.04.zip',
-    'ubuntu20.04': '%s/builds/webkit/%s/webkit-ubuntu-20.04.zip',
-    'mac10.13': undefined,
-    'mac10.14': undefined,
     'mac10.15': '%s/builds/webkit/%s/webkit-mac-10.15.zip',
     'mac11': '%s/builds/webkit/%s/webkit-mac-10.15.zip',
     'mac11-arm64': '%s/builds/webkit/%s/webkit-mac-11.0-arm64.zip',
@@ -152,37 +168,7 @@ const DOWNLOAD_URLS = {
   },
 };
 
-export const hostPlatform = ((): BrowserPlatform => {
-  const platform = os.platform();
-  if (platform === 'darwin') {
-    const [major, minor] = execSync('sw_vers -productVersion', {
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).toString('utf8').trim().split('.').map(x => parseInt(x, 10));
-    let arm64 = false;
-    // BigSur is the first version that might run on Apple Silicon.
-    if (major >= 11) {
-      arm64 = execSync('/usr/sbin/sysctl -in hw.optional.arm64', {
-        stdio: ['ignore', 'pipe', 'ignore']
-      }).toString().trim() === '1';
-    }
-    // We do not want to differentiate between minor big sur releases
-    // since they don't change core APIs so far.
-    const macVersion = major === 10 ? `${major}.${minor}` : `${major}`;
-    const archSuffix = arm64 ? '-arm64' : '';
-    return `mac${macVersion}${archSuffix}` as BrowserPlatform;
-  }
-  if (platform === 'linux') {
-    const ubuntuVersion = getUbuntuVersionSync();
-    if (parseInt(ubuntuVersion, 10) <= 19)
-      return 'ubuntu18.04';
-    return 'ubuntu20.04';
-  }
-  if (platform === 'win32')
-    return os.arch() === 'x64' ? 'win64' : 'win32';
-  return platform as BrowserPlatform;
-})();
-
-export const registryDirectory = (() => {
+const registryDirectory = (() => {
   let result: string;
 
   const envDefined = getFromENV('PLAYWRIGHT_BROWSERS_PATH');
@@ -214,7 +200,7 @@ export const registryDirectory = (() => {
   return result;
 })();
 
-export function isBrowserDirectory(browserDirectory: string): boolean {
+function isBrowserDirectory(browserDirectory: string): boolean {
   const baseName = path.basename(browserDirectory);
   for (const browserName of allBrowserNames) {
     if (baseName.startsWith(browserName + '-'))
@@ -223,36 +209,40 @@ export function isBrowserDirectory(browserDirectory: string): boolean {
   return false;
 }
 
-let currentPackageRegistry: Registry | undefined = undefined;
+type BrowserDescriptor = {
+  name: BrowserName,
+  revision: string,
+  installByDefault: boolean,
+  browserDirectory: string,
+};
+
+function readDescriptors(packagePath: string) {
+  const browsersJSON = require(path.join(packagePath, 'browsers.json'));
+  return (browsersJSON['browsers'] as any[]).map(obj => {
+    const name = obj.name;
+    const revisionOverride = (obj.revisionOverrides || {})[hostPlatform];
+    const revision = revisionOverride || obj.revision;
+    const browserDirectoryPrefix = revisionOverride ? `${name}_${hostPlatform}_special` : `${name}`;
+    const descriptor: BrowserDescriptor = {
+      name,
+      revision,
+      installByDefault: !!obj.installByDefault,
+      // Method `isBrowserDirectory` determines directory to be browser iff
+      // it starts with some browser name followed by '-'. Some browser names
+      // are prefixes of others, e.g. 'webkit' is a prefix of `webkit-technology-preview`.
+      // To avoid older registries erroneously removing 'webkit-technology-preview', we have to
+      // ensure that browser folders to never include dashes inside.
+      browserDirectory: browserDirectoryPrefix.replace(/-/g, '_') + '-' + revision,
+    };
+    return descriptor;
+  });
+}
 
 export class Registry {
   private _descriptors: BrowserDescriptor[];
 
-  static currentPackageRegistry() {
-    if (!currentPackageRegistry)
-      currentPackageRegistry = new Registry(PACKAGE_PATH);
-    return currentPackageRegistry;
-  }
-
   constructor(packagePath: string) {
-    const browsersJSON = JSON.parse(fs.readFileSync(path.join(packagePath, 'browsers.json'), 'utf8'));
-    this._descriptors = browsersJSON['browsers'].map((obj: any) => {
-      const name = obj.name;
-      const revisionOverride = (obj.revisionOverrides || {})[hostPlatform];
-      const revision = revisionOverride || obj.revision;
-      const browserDirectoryPrefix = revisionOverride ? `${name}_${hostPlatform}_special` : `${name}`;
-      return {
-        name,
-        revision,
-        installByDefault: !!obj.installByDefault,
-        // Method `isBrowserDirectory` determines directory to be browser iff
-        // it starts with some browser name followed by '-'. Some browser names
-        // are prefixes of others, e.g. 'webkit' is a prefix of `webkit-technology-preview`.
-        // To avoid older registries erroneously removing 'webkit-technology-preview', we have to
-        // ensure that browser folders to never include dashes inside.
-        browserDirectory: browserDirectoryPrefix.replace(/-/g, '_') + '-' + revision,
-      };
-    });
+    this._descriptors = readDescriptors(packagePath);
   }
 
   browserDirectory(browserName: BrowserName): string {
@@ -261,40 +251,10 @@ export class Registry {
     return path.join(registryDirectory, browser.browserDirectory);
   }
 
-  revision(browserName: BrowserName): number {
+  private _revision(browserName: BrowserName): string {
     const browser = this._descriptors.find(browser => browser.name === browserName);
     assert(browser, `ERROR: Playwright does not support ${browserName}`);
-    return parseInt(browser.revision, 10);
-  }
-
-  linuxLddDirectories(browserName: BrowserName): string[] {
-    const browserDirectory = this.browserDirectory(browserName);
-    if (browserName === 'chromium')
-      return [path.join(browserDirectory, 'chrome-linux')];
-    if (browserName === 'firefox')
-      return [path.join(browserDirectory, 'firefox')];
-    if (browserName === 'webkit') {
-      return [
-        path.join(browserDirectory, 'minibrowser-gtk'),
-        path.join(browserDirectory, 'minibrowser-gtk', 'bin'),
-        path.join(browserDirectory, 'minibrowser-gtk', 'lib'),
-        path.join(browserDirectory, 'minibrowser-wpe'),
-        path.join(browserDirectory, 'minibrowser-wpe', 'bin'),
-        path.join(browserDirectory, 'minibrowser-wpe', 'lib'),
-      ];
-    }
-    return [];
-  }
-
-  windowsExeAndDllDirectories(browserName: BrowserName): string[] {
-    const browserDirectory = this.browserDirectory(browserName);
-    if (browserName === 'chromium')
-      return [path.join(browserDirectory, 'chrome-win')];
-    if (browserName === 'firefox')
-      return [path.join(browserDirectory, 'firefox')];
-    if (browserName === 'webkit')
-      return [browserDirectory];
-    return [];
+    return browser.revision;
   }
 
   executablePath(browserName: BrowserName): string | undefined {
@@ -303,14 +263,15 @@ export class Registry {
     return tokens ? path.join(browserDirectory, ...tokens) : undefined;
   }
 
-  downloadURL(browserName: BrowserName): string {
+  private _downloadURL(browserName: BrowserName): string {
     const browser = this._descriptors.find(browser => browser.name === browserName);
     assert(browser, `ERROR: Playwright does not support ${browserName}`);
     const envDownloadHost: { [key: string]: string } = {
       'chromium': 'PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST',
+      'chromium-with-symbols': 'PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST',
       'firefox': 'PLAYWRIGHT_FIREFOX_DOWNLOAD_HOST',
+      'firefox-beta': 'PLAYWRIGHT_FIREFOX_DOWNLOAD_HOST',
       'webkit': 'PLAYWRIGHT_WEBKIT_DOWNLOAD_HOST',
-      'webkit-technology-preview': 'PLAYWRIGHT_WEBKIT_DOWNLOAD_HOST',
       'ffmpeg': 'PLAYWRIGHT_FFMPEG_DOWNLOAD_HOST',
     };
     const downloadHost = getFromENV(envDownloadHost[browserName]) ||
@@ -321,17 +282,179 @@ export class Registry {
     return util.format(urlTemplate, downloadHost, browser.revision);
   }
 
-  shouldRetain(browserName: BrowserName): boolean {
+  isSupportedBrowser(browserName: string): boolean {
     // We retain browsers if they are found in the descriptor.
     // Note, however, that there are older versions out in the wild that rely on
     // the "download" field in the browser descriptor and use its value
     // to retain and download browsers.
     // As of v1.10, we decided to abandon "download" field.
-    const browser = this._descriptors.find(browser => browser.name === browserName);
-    return !!browser;
+    return this._descriptors.some(browser => browser.name === browserName);
   }
 
-  installByDefault(): BrowserName[] {
+  private _installByDefault(): BrowserName[] {
     return this._descriptors.filter(browser => browser.installByDefault).map(browser => browser.name);
   }
+
+  async validateHostRequirements(browserName: BrowserName) {
+    if (getAsBooleanFromENV('PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS')) {
+      process.stdout.write('Skipping host requirements validation logic because `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS` env variable is set.\n');
+      return;
+    }
+    const ubuntuVersion = await getUbuntuVersion();
+    if ((browserName === 'firefox' || browserName === 'firefox-beta') && ubuntuVersion === '16.04')
+      throw new Error(`Cannot launch ${browserName} on Ubuntu 16.04! Minimum required Ubuntu version for Firefox browser is 18.04`);
+    const browserDirectory = this.browserDirectory(browserName);
+
+    if (os.platform() === 'linux') {
+      const dlOpenLibraries: string[] = [];
+      const linuxLddDirectories: string[] = [];
+      if (browserName === 'chromium' || browserName === 'chromium-with-symbols')
+        linuxLddDirectories.push(path.join(browserDirectory, 'chrome-linux'));
+      if (browserName === 'webkit') {
+        linuxLddDirectories.push(
+            path.join(browserDirectory, 'minibrowser-gtk'),
+            path.join(browserDirectory, 'minibrowser-gtk', 'bin'),
+            path.join(browserDirectory, 'minibrowser-gtk', 'lib'),
+            path.join(browserDirectory, 'minibrowser-wpe'),
+            path.join(browserDirectory, 'minibrowser-wpe', 'bin'),
+            path.join(browserDirectory, 'minibrowser-wpe', 'lib'),
+        );
+        dlOpenLibraries.push('libGLESv2.so.2', 'libx264.so');
+      }
+      if (browserName === 'firefox' || browserName === 'firefox-beta')
+        linuxLddDirectories.push(path.join(browserDirectory, 'firefox'));
+      return await validateDependenciesLinux(linuxLddDirectories, dlOpenLibraries);
+    }
+
+    if (os.platform() === 'win32' && os.arch() === 'x64') {
+      const windowsExeAndDllDirectories: string[] = [];
+      if (browserName === 'chromium' || browserName === 'chromium-with-symbols')
+        windowsExeAndDllDirectories.push(path.join(browserDirectory, 'chrome-win'));
+      if (browserName === 'firefox' || browserName === 'firefox-beta')
+        windowsExeAndDllDirectories.push(path.join(browserDirectory, 'firefox'));
+      if (browserName === 'webkit')
+        windowsExeAndDllDirectories.push(browserDirectory);
+      return await validateDependenciesWindows(windowsExeAndDllDirectories);
+    }
+  }
+
+  async installDeps(browserNames: BrowserName[]) {
+    const targets = new Set<'chromium' | 'firefox' | 'webkit' | 'tools'>();
+    if (!browserNames.length)
+      browserNames = this._installByDefault();
+    for (const browserName of browserNames) {
+      if (browserName === 'chromium' || browserName === 'chromium-with-symbols')
+        targets.add('chromium');
+      if (browserName === 'firefox' || browserName === 'firefox-beta')
+        targets.add('firefox');
+      if (browserName === 'webkit')
+        targets.add('webkit');
+    }
+    targets.add('tools');
+    if (os.platform() === 'win32')
+      return await installDependenciesWindows(targets);
+    if (os.platform() === 'linux')
+      return await installDependenciesLinux(targets);
+  }
+
+  async installBinaries(browserNames?: BrowserName[]) {
+    if (!browserNames)
+      browserNames = this._installByDefault();
+    await fs.promises.mkdir(registryDirectory, { recursive: true });
+    const lockfilePath = path.join(registryDirectory, '__dirlock');
+    const releaseLock = await lockfile.lock(registryDirectory, {
+      retries: {
+        retries: 10,
+        // Retry 20 times during 10 minutes with
+        // exponential back-off.
+        // See documentation at: https://www.npmjs.com/package/retry#retrytimeoutsoptions
+        factor: 1.27579,
+      },
+      onCompromised: (err: Error) => {
+        throw new Error(`${err.message} Path: ${lockfilePath}`);
+      },
+      lockfilePath,
+    });
+    const linksDir = path.join(registryDirectory, '.links');
+
+    try {
+      // Create a link first, so that cache validation does not remove our own browsers.
+      await fs.promises.mkdir(linksDir, { recursive: true });
+      await fs.promises.writeFile(path.join(linksDir, calculateSha1(PACKAGE_PATH)), PACKAGE_PATH);
+
+      // Remove stale browsers.
+      await this._validateInstallationCache(linksDir);
+
+      // Install missing browsers for this package.
+      for (const browserName of browserNames) {
+        const revision = this._revision(browserName);
+        const browserDirectory = this.browserDirectory(browserName);
+        const title = `${browserName} v${revision}`;
+        const downloadFileName = `playwright-download-${browserName}-${hostPlatform}-${revision}.zip`;
+        await downloadBrowserWithProgressBar(title, browserDirectory, this.executablePath(browserName)!, this._downloadURL(browserName), downloadFileName).catch(e => {
+          throw new Error(`Failed to download ${title}, caused by\n${e.stack}`);
+        });
+        await fs.promises.writeFile(markerFilePath(browserDirectory), '');
+      }
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  private async _validateInstallationCache(linksDir: string) {
+    // 1. Collect used downloads and package descriptors.
+    const usedBrowserPaths: Set<string> = new Set();
+    for (const fileName of await fs.promises.readdir(linksDir)) {
+      const linkPath = path.join(linksDir, fileName);
+      let linkTarget = '';
+      try {
+        linkTarget = (await fs.promises.readFile(linkPath)).toString();
+        const descriptors = readDescriptors(linkTarget);
+        for (const browserName of allBrowserNames) {
+          const descriptor = descriptors.find(d => d.name === browserName);
+          if (!descriptor)
+            continue;
+          const usedBrowserPath = path.join(registryDirectory, descriptor.browserDirectory);
+          const browserRevision = parseInt(descriptor.revision, 10);
+          // Old browser installations don't have marker file.
+          const shouldHaveMarkerFile = (browserName === 'chromium' && browserRevision >= 786218) ||
+              (browserName === 'firefox' && browserRevision >= 1128) ||
+              (browserName === 'webkit' && browserRevision >= 1307) ||
+              // All new applications have a marker file right away.
+              (browserName !== 'firefox' && browserName !== 'chromium' && browserName !== 'webkit');
+          if (!shouldHaveMarkerFile || (await existsAsync(markerFilePath(usedBrowserPath))))
+            usedBrowserPaths.add(usedBrowserPath);
+        }
+      } catch (e) {
+        await fs.promises.unlink(linkPath).catch(e => {});
+      }
+    }
+
+    // 2. Delete all unused browsers.
+    if (!getAsBooleanFromENV('PLAYWRIGHT_SKIP_BROWSER_GC')) {
+      let downloadedBrowsers = (await fs.promises.readdir(registryDirectory)).map(file => path.join(registryDirectory, file));
+      downloadedBrowsers = downloadedBrowsers.filter(file => isBrowserDirectory(file));
+      const directories = new Set<string>(downloadedBrowsers);
+      for (const browserDirectory of usedBrowserPaths)
+        directories.delete(browserDirectory);
+      for (const directory of directories)
+        logPolitely('Removing unused browser at ' + directory);
+      await removeFolders([...directories]);
+    }
+  }
 }
+
+function markerFilePath(browserDirectory: string): string {
+  return path.join(browserDirectory, 'INSTALLATION_COMPLETE');
+}
+
+export async function installDefaultBrowsersForNpmInstall() {
+  // PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD should have a value of 0 or 1
+  if (getAsBooleanFromENV('PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD')) {
+    logPolitely('Skipping browsers download because `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` env variable is set');
+    return false;
+  }
+  await registry.installBinaries();
+}
+
+export const registry = new Registry(PACKAGE_PATH);

@@ -6,7 +6,7 @@ title: "Community Showcase"
 ## Users
 
 * [VS Code](https://github.com/microsoft/vscode): Playwright is used to run cross-browser tests on their web builds
-* [TypeScript](https://github.com/microsoft/TypeScript): Playwright is used test typescript.js across browsers
+* [TypeScript](https://github.com/microsoft/TypeScript): Playwright is used to test typescript.js across browsers
 * [Elastic APM JS agent](https://github.com/elastic/apm-agent-rum-js): Playwright is used to run benchmark tests across browsers
 * [Blockstack](https://github.com/blockstack/ux): Playwright is used to run cross-browser UI tests
 * [Instakittens React admin](https://github.com/fredericbonnet/instakittens-react-admin): Playwright is used to run end-to-end test scenarios written with Cucumber
@@ -29,6 +29,7 @@ title: "Community Showcase"
 * [CodeceptJS](https://github.com/Codeception/CodeceptJS): Write scenario-driven Playwright tests with synchronous code
 * [dom-to-playwright](https://github.com/Xiphe/dom-to-playwright) to copy a JSDOM snapshot into a Playwright page.
 * [expected-condition-playwright](https://github.com/elaichenkov/expected-condition-playwright): Supplies a set of common expected conditions that can wait for certain states and conditions
+* [expect-playwright](https://github.com/playwright-community/expect-playwright): Matcher functions to simplify expect statements for the usage with the Playwright test runner or Jest Playwright.
 * [Headless Testing](https://headlesstesting.com/support/start/playwright.html): Run Playwright tests on browsers in the cloud
 * [Lumberjack](https://github.com/JakePartusch/lumberjack): Automated accessibility scanner to run checks on your entire website
 * [mockiavelli](https://github.com/HLTech/mockiavelli) Request mocking library for Playwright to test SPA in isolation from backend APIs.
@@ -38,6 +39,7 @@ title: "Community Showcase"
 * [QA Wolf](https://github.com/qawolf/qawolf): Record and create Playwright tests and then run them in CI
 * [Root Cause OSS](https://github.com/testimio/root-cause): Capture screenshots on every step and display in a viewer with logs for easy troubleshooting.
 * [Sauce Labs](https://saucelabs.com/platform/automation-tools/playwright): Run Playwright tests in parallel in the cloud or your own docker environment.
+* [Selenium Box - Enterprise Test Grid](https://seleniumbox.com): Execute Playwright tests securely inside your firewall at scale
 * [test-real-styles](https://github.com/Xiphe/test-real-styles): Utility to test real styling of virtual DOM elements in a browser
 * [Testim Playground](https://www.testim.io/playground/): Record Playwright UI tests as code
 * [Try Playwright](https://try.playwright.tech/): Interactive playground for Playwright to run examples directly from your browser

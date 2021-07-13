@@ -18,11 +18,11 @@
 
 /* eslint-disable no-console */
 
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import program from 'commander';
-import os from 'os';
-import fs from 'fs';
-import { runServer, printApiJson, launchBrowserServer, installBrowsers } from './driver';
+import { runDriver, runServer, printApiJson, launchBrowserServer } from './driver';
 import { showTraceViewer } from '../server/trace/viewer/traceViewer';
 import * as playwright from '../..';
 import { BrowserContext } from '../client/browserContext';
@@ -31,12 +31,50 @@ import { Page } from '../client/page';
 import { BrowserType } from '../client/browserType';
 import { BrowserContextOptions, LaunchOptions } from '../client/types';
 import { spawn } from 'child_process';
-import { installDeps } from '../install/installDeps';
-import { allBrowserNames } from '../utils/registry';
+import { allBrowserNames, BrowserName, registry } from '../utils/registry';
+import * as utils from '../utils/utils';
+
+const SCRIPTS_DIRECTORY = path.join(__dirname, '..', '..', 'bin');
+
+
+type BrowserChannel = 'chrome-beta'|'chrome'|'msedge'|'msedge-beta';
+const allBrowserChannels: Set<BrowserChannel> = new Set(['chrome-beta', 'chrome', 'msedge', 'msedge-beta']);
+const suggestedBrowsersToInstall = ['chromium', 'webkit', 'firefox', ...allBrowserChannels].map(name => `'${name}'`).join(', ');
+
+const packageJSON = require('../../package.json');
+
+const ChannelName = {
+  'chrome-beta': 'Google Chrome Beta',
+  'chrome': 'Google Chrome',
+  'msedge': 'Microsoft Edge',
+  'msedge-beta': 'Microsoft Edge Beta',
+};
+
+const InstallationScriptName = {
+  'chrome-beta': {
+    'linux': 'reinstall_chrome_beta_linux.sh',
+    'darwin': 'reinstall_chrome_beta_mac.sh',
+    'win32': 'reinstall_chrome_beta_win.ps1',
+  },
+  'chrome': {
+    'linux': 'reinstall_chrome_stable_linux.sh',
+    'darwin': 'reinstall_chrome_stable_mac.sh',
+    'win32': 'reinstall_chrome_stable_win.ps1',
+  },
+  'msedge': {
+    'darwin': 'reinstall_msedge_stable_mac.sh',
+    'win32': 'reinstall_msedge_stable_win.ps1',
+  },
+  'msedge-beta': {
+    'darwin': 'reinstall_msedge_beta_mac.sh',
+    'linux': 'reinstall_msedge_beta_linux.sh',
+    'win32': 'reinstall_msedge_beta_win.ps1',
+  },
+};
 
 program
-    .version('Version ' + require('../../package.json').version)
-    .name('npx playwright');
+    .version('Version ' + packageJSON.version)
+    .name(process.env.PW_CLI_NAME || 'npx playwright');
 
 commandWithOpenOptions('open [url]', 'open page in browser specified via -b, --browser', [])
     .action(function(url, command) {
@@ -53,7 +91,7 @@ commandWithOpenOptions('open [url]', 'open page in browser specified via -b, --b
 commandWithOpenOptions('codegen [url]', 'open page and generate code for user actions',
     [
       ['-o, --output <file name>', 'saves the generated script to a file'],
-      ['--target <language>', `language to use, one of javascript, python, python-async, csharp`, language()],
+      ['--target <language>', `language to generate, one of javascript, test, python, python-async, csharp`, language()],
     ]).action(function(url, command) {
   codegen(command, url, command.target, command.output).catch(logErrorAndExit);
 }).on('--help', function() {
@@ -84,30 +122,76 @@ program
 program
     .command('install [browserType...]')
     .description('ensure browsers necessary for this version of Playwright are installed')
-    .action(async function(browserType) {
+    .action(async function(args) {
       try {
-        const allBrowsers = new Set(allBrowserNames);
-        for (const type of browserType) {
-          if (!allBrowsers.has(type)) {
-            console.log(`Invalid browser name: '${type}'. Expecting one of: ${allBrowserNames.map(name => `'${name}'`).join(', ')}`);
-            process.exit(1);
-          }
+        // Install default browsers when invoked without arguments.
+        if (!args.length) {
+          await registry.installBinaries();
+          return;
         }
-        if (browserType.length && browserType.includes('chromium'))
-          browserType = browserType.concat('ffmpeg');
-        await installBrowsers(browserType.length ? browserType : undefined);
+        const browserNames: Set<BrowserName> = new Set(args.filter((browser: any) => allBrowserNames.has(browser)));
+        const browserChannels: Set<BrowserChannel> = new Set(args.filter((browser: any) => allBrowserChannels.has(browser)));
+        const faultyArguments: string[] = args.filter((browser: any) => !browserNames.has(browser) && !browserChannels.has(browser));
+        if (faultyArguments.length) {
+          console.log(`Invalid installation targets: ${faultyArguments.map(name => `'${name}'`).join(', ')}. Expecting one of: ${suggestedBrowsersToInstall}`);
+          process.exit(1);
+        }
+        if (browserNames.has('chromium') || browserChannels.has('chrome-beta') || browserChannels.has('chrome') || browserChannels.has('msedge') || browserChannels.has('msedge-beta'))
+          browserNames.add('ffmpeg');
+        if (browserNames.size)
+          await registry.installBinaries([...browserNames]);
+        for (const browserChannel of browserChannels)
+          await installBrowserChannel(browserChannel);
       } catch (e) {
         console.log(`Failed to install browsers\n${e}`);
         process.exit(1);
       }
+    }).on('--help', function() {
+      console.log(``);
+      console.log(`Examples:`);
+      console.log(`  - $ install`);
+      console.log(`    Install default browsers.`);
+      console.log(``);
+      console.log(`  - $ install chrome firefox`);
+      console.log(`    Install custom browsers, supports ${suggestedBrowsersToInstall}.`);
     });
+
+async function installBrowserChannel(channel: BrowserChannel) {
+  const platform = os.platform();
+  const scriptName: (string|undefined) = (InstallationScriptName[channel] as any)[platform];
+  if (!scriptName)
+    throw new Error(`Cannot install ${ChannelName[channel]} on ${platform}`);
+
+  const scriptArgs = [];
+  if ((channel === 'msedge' || channel === 'msedge-beta') && platform !== 'linux') {
+    const products = JSON.parse(await utils.fetchData('https://edgeupdates.microsoft.com/api/products'));
+    const productName = channel === 'msedge' ? 'Stable' : 'Beta';
+    const product = products.find((product: any) => product.Product === productName);
+    const searchConfig = ({
+      darwin: {platform: 'MacOS', arch: 'universal', artifact: 'pkg'},
+      win32: {platform: 'Windows', arch: os.arch() === 'x64' ? 'x64' : 'x86', artifact: 'msi'},
+    } as any)[platform];
+    const release = searchConfig ? product.Releases.find((release: any) => release.Platform === searchConfig.platform && release.Architecture === searchConfig.arch) : null;
+    const artifact = release ? release.Artifacts.find((artifact: any) => artifact.ArtifactName === searchConfig.artifact) : null;
+    if (artifact)
+      scriptArgs.push(artifact.Location /* url */);
+    else
+      throw new Error(`Cannot install ${ChannelName[channel]} on ${platform}`);
+  }
+
+  const shell = scriptName.endsWith('.ps1') ? 'powershell.exe' : 'bash';
+  const {code} = await utils.spawnAsync(shell, [path.join(SCRIPTS_DIRECTORY, scriptName), ...scriptArgs], { cwd: SCRIPTS_DIRECTORY, stdio: 'inherit' });
+  if (code !== 0)
+    throw new Error(`Failed to install ${ChannelName[channel]}`);
+}
 
 program
     .command('install-deps [browserType...]')
     .description('install dependencies necessary to run browsers (will ask for sudo permissions)')
-    .action(async function(browserType) {
+    .action(async function(browserTypes) {
       try {
-        await installDeps(browserType);
+        // TODO: verify the list and print supported browserTypes in the error message.
+        await registry.installDeps(browserTypes);
       } catch (e) {
         console.log(`Failed to install browser dependencies\n${e}`);
         process.exit(1);
@@ -159,24 +243,55 @@ commandWithOpenOptions('pdf <url> <filename>', 'save page as pdf',
   console.log('  $ pdf https://example.com example.pdf');
 });
 
-if (process.env.PWTRACE) {
-  program
-      .command('show-trace [trace]')
-      .option('--resources <dir>', 'load resources from shared folder')
-      .description('Show trace viewer')
-      .action(function(trace, command) {
-        showTraceViewer(trace, command.resources).catch(logErrorAndExit);
-      }).on('--help', function() {
-        console.log('');
-        console.log('Examples:');
-        console.log('');
-        console.log('  $ show-trace --resources=resources trace/file.trace');
-        console.log('  $ show-trace trace/directory');
+program
+    .command('show-trace [trace]')
+    .option('-b, --browser <browserType>', 'browser to use, one of cr, chromium, ff, firefox, wk, webkit', 'chromium')
+    .description('Show trace viewer')
+    .action(function(trace, command) {
+      if (command.browser === 'cr')
+        command.browser = 'chromium';
+      if (command.browser === 'ff')
+        command.browser = 'firefox';
+      if (command.browser === 'wk')
+        command.browser = 'webkit';
+      showTraceViewer(trace, command.browser).catch(logErrorAndExit);
+    }).on('--help', function() {
+      console.log('');
+      console.log('Examples:');
+      console.log('');
+      console.log('  $ show-trace trace/directory');
+    });
+
+if (!process.env.PW_CLI_TARGET_LANG) {
+  let playwrightTestPackagePath = null;
+  try {
+    const isLocal = packageJSON.name === '@playwright/test' || process.env.PWTEST_CLI_ALLOW_TEST_COMMAND;
+    if (isLocal) {
+      playwrightTestPackagePath = '../test/cli';
+    } else {
+      playwrightTestPackagePath = require.resolve('@playwright/test/lib/test/cli', {
+        paths: [__dirname, process.cwd()]
       });
+    }
+  } catch {}
+
+  if (playwrightTestPackagePath) {
+    require(playwrightTestPackagePath).addTestCommand(program);
+  } else {
+    const command = program.command('test').allowUnknownOption(true);
+    command.description('Run tests with Playwright Test. Available in @playwright/test package.');
+    command.action(async (args, opts) => {
+      console.error('Please install @playwright/test package to use Playwright Test.');
+      console.error('  npm install -D @playwright/test');
+      process.exit(1);
+    });
+  }
 }
 
 if (process.argv[2] === 'run-driver')
-  runServer();
+  runDriver();
+else if (process.argv[2] === 'run-server')
+  runServer(process.argv[3] ? +process.argv[3] : undefined);
 else if (process.argv[2] === 'print-api-json')
   printApiJson();
 else if (process.argv[2] === 'launch-server')
@@ -207,10 +322,10 @@ type CaptureOptions = {
   fullPage: boolean;
 };
 
-async function launchContext(options: Options, headless: boolean): Promise<{ browser: Browser, browserName: string, launchOptions: LaunchOptions, contextOptions: BrowserContextOptions, context: BrowserContext }> {
+async function launchContext(options: Options, headless: boolean, executablePath?: string): Promise<{ browser: Browser, browserName: string, launchOptions: LaunchOptions, contextOptions: BrowserContextOptions, context: BrowserContext }> {
   validateOptions(options);
   const browserType = lookupBrowserType(options);
-  const launchOptions: LaunchOptions = { headless };
+  const launchOptions: LaunchOptions = { headless, executablePath };
   if (options.channel)
     launchOptions.channel = options.channel as any;
 
@@ -233,8 +348,7 @@ async function launchContext(options: Options, headless: boolean): Promise<{ bro
   if (contextOptions.isMobile && browserType.name() === 'firefox')
     contextOptions.isMobile = undefined;
 
-  if (process.env.PWTRACE)
-    (contextOptions as any)._traceDir = path.join(process.cwd(), '.trace');
+  contextOptions.acceptDownloads = true;
 
   // Proxy
 
@@ -331,7 +445,9 @@ async function launchContext(options: Options, headless: boolean): Promise<{ bro
 
   // Omit options that we add automatically for presentation purpose.
   delete launchOptions.headless;
+  delete launchOptions.executablePath;
   delete contextOptions.deviceScaleFactor;
+  delete contextOptions.acceptDownloads;
   return { browser, browserName: browserType.name(), context, contextOptions, launchOptions };
 }
 
@@ -340,7 +456,7 @@ async function openPage(context: BrowserContext, url: string | undefined): Promi
   if (url) {
     if (fs.existsSync(url))
       url = 'file://' + path.resolve(url);
-    else if (!url.startsWith('http') && !url.startsWith('file://') && !url.startsWith('about:'))
+    else if (!url.startsWith('http') && !url.startsWith('file://') && !url.startsWith('about:') && !url.startsWith('data:'))
       url = 'http://' + url;
     await page.goto(url);
   }
@@ -348,7 +464,7 @@ async function openPage(context: BrowserContext, url: string | undefined): Promi
 }
 
 async function open(options: Options, url: string | undefined, language: string) {
-  const { context, launchOptions, contextOptions } = await launchContext(options, !!process.env.PWCLI_HEADLESS_FOR_TEST);
+  const { context, launchOptions, contextOptions } = await launchContext(options, !!process.env.PWTEST_CLI_HEADLESS, process.env.PWTEST_CLI_EXECUTABLE_PATH);
   await context._enableRecorder({
     language,
     launchOptions,
@@ -357,14 +473,12 @@ async function open(options: Options, url: string | undefined, language: string)
     saveStorage: options.saveStorage,
   });
   await openPage(context, url);
-  if (process.env.PWCLI_EXIT_FOR_TEST)
+  if (process.env.PWTEST_CLI_EXIT)
     await Promise.all(context.pages().map(p => p.close()));
 }
 
 async function codegen(options: Options, url: string | undefined, language: string, outputFile?: string) {
-  const { context, launchOptions, contextOptions } = await launchContext(options, !!process.env.PWCLI_HEADLESS_FOR_TEST);
-  if (process.env.PWTRACE)
-    contextOptions._traceDir = path.join(process.cwd(), '.trace');
+  const { context, launchOptions, contextOptions } = await launchContext(options, !!process.env.PWTEST_CLI_HEADLESS, process.env.PWTEST_CLI_EXECUTABLE_PATH);
   await context._enableRecorder({
     language,
     launchOptions,
@@ -375,7 +489,7 @@ async function codegen(options: Options, url: string | undefined, language: stri
     outputFile: outputFile ? path.resolve(outputFile) : undefined
   });
   await openPage(context, url);
-  if (process.env.PWCLI_EXIT_FOR_TEST)
+  if (process.env.PWTEST_CLI_EXIT)
     await Promise.all(context.pages().map(p => p.close()));
 }
 
@@ -453,7 +567,7 @@ function logErrorAndExit(e: Error) {
 }
 
 function language(): string {
-  return process.env.PW_CLI_TARGET_LANG || 'javascript';
+  return process.env.PW_CLI_TARGET_LANG || 'test';
 }
 
 function commandWithOpenOptions(command: string, description: string, options: any[][]): program.Command {

@@ -16,7 +16,6 @@
 
 import { BrowserContext } from '../server/browserContext';
 import { Frame } from '../server/frames';
-import { Request } from '../server/network';
 import { Page, Worker } from '../server/page';
 import * as channels from '../protocol/channels';
 import { Dispatcher, DispatcherScope, existingDispatcher, lookupDispatcher, lookupNullableDispatcher } from './dispatcher';
@@ -26,7 +25,7 @@ import { DialogDispatcher } from './dialogDispatcher';
 import { FrameDispatcher } from './frameDispatcher';
 import { RequestDispatcher, ResponseDispatcher, RouteDispatcher, WebSocketDispatcher } from './networkDispatchers';
 import { serializeResult, parseArgument } from './jsHandleDispatcher';
-import { ElementHandleDispatcher, createHandle } from './elementHandlerDispatcher';
+import { ElementHandleDispatcher } from './elementHandlerDispatcher';
 import { FileChooser } from '../server/fileChooser';
 import { CRCoverage } from '../server/chromium/crCoverage';
 import { JSHandle } from '../server/javascript';
@@ -34,9 +33,17 @@ import { CallMetadata } from '../server/instrumentation';
 import { Artifact } from '../server/artifact';
 import { ArtifactDispatcher } from './artifactDispatcher';
 import { Download } from '../server/download';
+import { createGuid } from '../utils/utils';
 
 export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> implements channels.PageChannel {
   private _page: Page;
+
+  static fromNullable(scope: DispatcherScope, page: Page | undefined): PageDispatcher | undefined {
+    if (!page)
+      return undefined;
+    const result = existingDispatcher<PageDispatcher>(page);
+    return result || new PageDispatcher(scope, page);
+  }
 
   constructor(scope: DispatcherScope, page: Page) {
     // TODO: theoretically, there could be more than one frame already.
@@ -44,7 +51,8 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
     super(scope, page, 'Page', {
       mainFrame: FrameDispatcher.from(scope, page.mainFrame()),
       viewportSize: page.viewportSize() || undefined,
-      isClosed: page.isClosed()
+      isClosed: page.isClosed(),
+      opener: PageDispatcher.fromNullable(scope, page.opener())
     }, true);
     this._page = page;
     page.on(Page.Events.Close, () => {
@@ -59,30 +67,22 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
       this._dispatchEvent('download', { url: download.url, suggestedFilename: download.suggestedFilename(), artifact: new ArtifactDispatcher(scope, download.artifact) });
     });
     this._page.on(Page.Events.FileChooser, (fileChooser: FileChooser) => this._dispatchEvent('fileChooser', {
-      element: new ElementHandleDispatcher(this._scope, fileChooser.element()),
+      element: ElementHandleDispatcher.from(this._scope, fileChooser.element()),
       isMultiple: fileChooser.isMultiple()
     }));
     page.on(Page.Events.FrameAttached, frame => this._onFrameAttached(frame));
     page.on(Page.Events.FrameDetached, frame => this._onFrameDetached(frame));
     page.on(Page.Events.Load, () => this._dispatchEvent('load'));
     page.on(Page.Events.PageError, error => this._dispatchEvent('pageError', { error: serializeError(error) }));
-    page.on(Page.Events.Popup, page => this._dispatchEvent('popup', { page: lookupDispatcher<PageDispatcher>(page) }));
-    page.on(Page.Events.Request, request => this._dispatchEvent('request', { request: RequestDispatcher.from(this._scope, request) }));
-    page.on(Page.Events.RequestFailed, (request: Request) => this._dispatchEvent('requestFailed', {
-      request: RequestDispatcher.from(this._scope, request),
-      failureText: request._failureText,
-      responseEndTiming: request._responseEndTiming
-    }));
-    page.on(Page.Events.RequestFinished, (request: Request) => this._dispatchEvent('requestFinished', {
-      request: RequestDispatcher.from(scope, request),
-      responseEndTiming: request._responseEndTiming
-    }));
-    page.on(Page.Events.Response, response => this._dispatchEvent('response', { response: new ResponseDispatcher(this._scope, response) }));
     page.on(Page.Events.WebSocket, webSocket => this._dispatchEvent('webSocket', { webSocket: new WebSocketDispatcher(this._scope, webSocket) }));
     page.on(Page.Events.Worker, worker => this._dispatchEvent('worker', { worker: new WorkerDispatcher(this._scope, worker) }));
     page.on(Page.Events.Video, (artifact: Artifact) => this._dispatchEvent('video', { artifact: existingDispatcher<ArtifactDispatcher>(artifact) }));
     if (page._video)
       this._dispatchEvent('video', { artifact: existingDispatcher<ArtifactDispatcher>(page._video) });
+  }
+
+  page(): Page {
+    return this._page;
   }
 
   async setDefaultNavigationTimeoutNoReply(params: channels.PageSetDefaultNavigationTimeoutNoReplyParams, metadata: CallMetadata): Promise<void> {
@@ -91,10 +91,6 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
 
   async setDefaultTimeoutNoReply(params: channels.PageSetDefaultTimeoutNoReplyParams, metadata: CallMetadata): Promise<void> {
     this._page.setDefaultTimeout(params.timeout);
-  }
-
-  async opener(params: channels.PageOpenerParams, metadata: CallMetadata): Promise<channels.PageOpenerResult> {
-    return { page: lookupNullableDispatcher<PageDispatcher>(await this._page.opener()) };
   }
 
   async exposeBinding(params: channels.PageExposeBindingParams, metadata: CallMetadata): Promise<void> {
@@ -125,6 +121,7 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
     await this._page.emulateMedia({
       media: params.media === 'null' ? null : params.media,
       colorScheme: params.colorScheme === 'null' ? null : params.colorScheme,
+      reducedMotion: params.reducedMotion === 'null' ? null : params.reducedMotion,
     });
   }
 
@@ -142,7 +139,7 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
       return;
     }
     await this._page._setClientRequestInterceptor((route, request) => {
-      this._dispatchEvent('route', { route: new RouteDispatcher(this._scope, route), request: RequestDispatcher.from(this._scope, request) });
+      this._dispatchEvent('route', { route: RouteDispatcher.from(this._scope, route), request: RequestDispatcher.from(this._scope, request) });
     });
   }
 
@@ -217,22 +214,22 @@ export class PageDispatcher extends Dispatcher<Page, channels.PageInitializer> i
     await this._page.bringToFront();
   }
 
-  async crStartJSCoverage(params: channels.PageCrStartJSCoverageParams, metadata: CallMetadata): Promise<void> {
+  async startJSCoverage(params: channels.PageStartJSCoverageParams, metadata: CallMetadata): Promise<void> {
     const coverage = this._page.coverage as CRCoverage;
     await coverage.startJSCoverage(params);
   }
 
-  async crStopJSCoverage(params: channels.PageCrStopJSCoverageParams, metadata: CallMetadata): Promise<channels.PageCrStopJSCoverageResult> {
+  async stopJSCoverage(params: channels.PageStopJSCoverageParams, metadata: CallMetadata): Promise<channels.PageStopJSCoverageResult> {
     const coverage = this._page.coverage as CRCoverage;
     return { entries: await coverage.stopJSCoverage() };
   }
 
-  async crStartCSSCoverage(params: channels.PageCrStartCSSCoverageParams, metadata: CallMetadata): Promise<void> {
+  async startCSSCoverage(params: channels.PageStartCSSCoverageParams, metadata: CallMetadata): Promise<void> {
     const coverage = this._page.coverage as CRCoverage;
     await coverage.startCSSCoverage(params);
   }
 
-  async crStopCSSCoverage(params: channels.PageCrStopCSSCoverageParams, metadata: CallMetadata): Promise<channels.PageCrStopCSSCoverageResult> {
+  async stopCSSCoverage(params: channels.PageStopCSSCoverageParams, metadata: CallMetadata): Promise<channels.PageStopCSSCoverageResult> {
     const coverage = this._page.coverage as CRCoverage;
     return { entries: await coverage.stopCSSCoverage() };
   }
@@ -260,21 +257,21 @@ export class WorkerDispatcher extends Dispatcher<Worker, channels.WorkerInitiali
   }
 
   async evaluateExpressionHandle(params: channels.WorkerEvaluateExpressionHandleParams, metadata: CallMetadata): Promise<channels.WorkerEvaluateExpressionHandleResult> {
-    return { handle: createHandle(this._scope, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg))) };
+    return { handle: ElementHandleDispatcher.fromJSHandle(this._scope, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg))) };
   }
 }
 
-export class BindingCallDispatcher extends Dispatcher<{}, channels.BindingCallInitializer> implements channels.BindingCallChannel {
+export class BindingCallDispatcher extends Dispatcher<{ guid: string }, channels.BindingCallInitializer> implements channels.BindingCallChannel {
   private _resolve: ((arg: any) => void) | undefined;
   private _reject: ((error: any) => void) | undefined;
   private _promise: Promise<any>;
 
   constructor(scope: DispatcherScope, name: string, needsHandle: boolean, source: { context: BrowserContext, page: Page, frame: Frame }, args: any[]) {
-    super(scope, {}, 'BindingCall', {
+    super(scope, { guid: createGuid() }, 'BindingCall', {
       frame: lookupDispatcher<FrameDispatcher>(source.frame),
       name,
       args: needsHandle ? undefined : args.map(serializeResult),
-      handle: needsHandle ? createHandle(scope, args[0] as JSHandle) : undefined,
+      handle: needsHandle ? ElementHandleDispatcher.fromJSHandle(scope, args[0] as JSHandle) : undefined,
     });
     this._promise = new Promise((resolve, reject) => {
       this._resolve = resolve;

@@ -21,9 +21,9 @@ import { Download } from './download';
 import { ProxySettings } from './types';
 import { ChildProcess } from 'child_process';
 import { RecentLogsCollector } from '../utils/debugLogger';
-import * as registry from '../utils/registry';
 import { SdkObject } from './instrumentation';
 import { Artifact } from './artifact';
+import { Selectors } from './selectors';
 
 export interface BrowserProcess {
   onclose?: ((exitCode: number | null, signal: string | null) => void);
@@ -33,18 +33,22 @@ export interface BrowserProcess {
 }
 
 export type PlaywrightOptions = {
-  registry: registry.Registry,
   rootSdkObject: SdkObject,
+  selectors: Selectors,
+  loopbackProxyOverride?: () => string,
 };
 
 export type BrowserOptions = PlaywrightOptions & {
   name: string,
   isChromium: boolean,
-  channel?: types.BrowserChannel,
-  downloadsPath?: string,
+  channel?: string,
+  artifactsDir: string;
+  downloadsPath: string,
+  tracesDir: string,
   headful?: boolean,
   persistent?: types.BrowserContextOptions,  // Undefined means no persistent context.
   browserProcess: BrowserProcess,
+  customExecutablePath?: string;
   proxy?: ProxySettings,
   protocolLogger: types.ProtocolLogger,
   browserLogsCollector: RecentLogsCollector,
@@ -64,7 +68,7 @@ export abstract class Browser extends SdkObject {
   readonly _idToVideo = new Map<string, { context: BrowserContext, artifact: Artifact }>();
 
   constructor(options: BrowserOptions) {
-    super(options.rootSdkObject);
+    super(options.rootSdkObject, 'browser');
     this.attribution.browser = this;
     this.options = options;
   }
@@ -95,7 +99,7 @@ export abstract class Browser extends SdkObject {
   }
 
   _videoStarted(context: BrowserContext, videoId: string, path: string, pageOrError: Promise<Page | Error>) {
-    const artifact = new Artifact(path);
+    const artifact = new Artifact(context, path);
     this._idToVideo.set(videoId, { context, artifact });
     context.emit(BrowserContext.Events.VideoStarted, artifact);
     pageOrError.then(page => {
@@ -106,10 +110,10 @@ export abstract class Browser extends SdkObject {
     });
   }
 
-  _videoFinished(videoId: string) {
+  _takeVideo(videoId: string): Artifact | undefined {
     const video = this._idToVideo.get(videoId);
     this._idToVideo.delete(videoId);
-    video?.artifact.reportFinished();
+    return video?.artifact;
   }
 
   _didClose() {
@@ -127,5 +131,9 @@ export abstract class Browser extends SdkObject {
     }
     if (this.isConnected())
       await new Promise(x => this.once(Browser.Events.Disconnected, x));
+  }
+
+  async killForTests() {
+    await this.options.browserProcess.kill();
   }
 }
